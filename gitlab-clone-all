@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# This script will clone all projects found under a GitLab group and any
+# subgroups.
+
+# Uses https://pypi.org/project/python-gitlab/ for a gitlab CLI command
+
+# Install: pip install python-gitlab   # or other mechanisms
+
+# Configure a Personal Access Token in GitLab
+
+# Create a configuration file, ~/.python-gitlab.cfg, example:
+#
+#    [global]
+#    default = gitlab
+#    ssl_verify = true
+#    timeout = 5
+#
+#    [gitlab]
+#    url = https://gitlab.com
+#    private_token = <redacted>
+#    api_version = 4
+
+# Look up the GitLab group id, an integer, at the website.
+
+# one potential argument, the group id
+if [ $# -eq 0 ]; then
+  read -p 'Enter the group number: ' grp
+else
+  grp="$1"
+fi
+
+wiki=no
+
+knarly_regexp=\
+'^\(name:\|ssh-url-to-repo\|path:\|  project-access: None\|empty-repo: True\)'
+
+# start pipe off by getting full project ID list
+gitlab group-project list --all --group-id $grp   \
+  --include-subgroups true |   \
+  sed '/^$/d;s/id: //' |   \
+  while read prj;do
+    # For each project ID, get a big block of meta-data
+    gitlab -v project get --id $prj
+  done |   \
+  # select just four fields from the meta-data
+  grep "$knarly_regexp" |   \
+  while read value;do
+
+    # empty-repo - true if just a wiki
+    if echo "$value" | grep -q '^empty-repo: True' ; then
+      wiki=yes
+    # name field
+    elif echo "$value" | grep -q ^name: ; then
+      name=$(echo "$value" | sed 's/^name: //')
+      
+    # path field
+    elif echo "$value" | grep -q ^path: ; then
+      path=$(echo "$value" | sed 's/^path: //')
+      
+    # ssh url field
+    elif echo "$value" | grep -q ^ssh-url-to-repo: ; then
+      url=$(echo "$value" | sed 's/ssh-url-to-repo: //')
+      # if there already exists a directory matching path,
+      # then assume we are done
+      if [ "$wiki" == "yes" ]; then
+	path="${path}.wiki"
+        if [ ! -d "$path" ]; then
+          echo -e "\n$name ($path) WIKI"
+          surl=${url/%\.git/.wiki.git}
+          git clone $surl
+	  wiki=no
+	else
+          if [ ! -d "$path" ]; then
+  	    echo -e "\n$name ($path)"
+            git clone $url
+          fi
+        fi
+      fi
+    fi
+  done
