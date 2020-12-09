@@ -70,11 +70,11 @@ gitlab group-project list --all --group-id $grp   \
           surl=${url/%\.git/.wiki.git}
           git clone $surl
 	  wiki=no
-	else
-          if [ ! -d "$path" ]; then
-  	    echo -e "\n$name ($path)"
-            git clone $url
-          fi
+	fi
+      else
+        if [ ! -d "$path" ]; then
+  	  echo -e "\n$name ($path)"
+          git clone $url
         fi
       fi
     fi
