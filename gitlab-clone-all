@@ -14,68 +14,211 @@
 #    [global]
 #    default = gitlab
 #    ssl_verify = true
-#    timeout = 5
+#    timeout = 20
 #
 #    [gitlab]
 #    url = https://gitlab.com
 #    private_token = <redacted>
 #    api_version = 4
 
-# Look up the GitLab group id, an integer, at the website.
+# You should look up the GitLab group id, an integer, at the website.
 
-# one potential argument, the group id
+# initialize command line related variables
+noarchived=false
+archivedir=''
+hierarchy=false
+
+usage() {
+  echo "GITLAB-CLONE-ALL:  Clone all GitLab repos nested under a given group id number (an integer)."
+  echo "This script has one potential positional argument, the group id, which, if provided,"
+  echo "will always be the first argument. If the group id is not provided, you will be"
+  echo "prompted for it. An optional argument may be given only if the group id is"
+  echo "provided. It will be one of these forms:"
+  echo "  -noarchived                   # which will skip any archived repos"
+  echo "  -archivedhere <directory>     # which will store archived repos in given directory"
+  echo "In addition, this optional argument may occur if the group id is provided"
+  echo "  -hierarchy                    # recreate repos in directory hierarchy seen on GitLab"
+  echo ""
+  echo "Examples:"
+  echo "  gitlab-clone-all                                    # prompt for group id"
+  echo "  gitlab-clone-all  00000000                          # provide group id of 0000000"
+  echo "  gitlab-clone-all  00000000 -noarchived              # skip all archived repos"
+  echo "  gitlab-clone-all  00000000 -archivedhere ARCHIVED"
+  echo "                      # clone all archive repos in directory ARCHIVED"
+  echo "  gitlab-clone-all  00000000 -archivedhere ARCHIVED -hierarchy"
+  echo "                      # do the above, plus store in a directory structure as GitLab"
+}
+
+# Process arguments or lack thereof
 if [ $# -eq 0 ]; then
+  # if no arguments, then just prompt for the group number
   read -p 'Enter the group number: ' grp
 else
+  if [ "$1" == "-h" -o "$1" == "-help" -o "$1" == "--help" ]; then
+    usage
+    exit 0
+  fi
   grp="$1"
+  shift
+
+  while [[ $# -gt 0 ]]; do
+    key=$1
+    case $key in
+      -noarchived)
+        noarchived=true
+        shift
+        ;;
+      -archivedhere)
+        shift
+        archivedir="$1"
+        shift
+        ;;
+      -hierarchy)
+        hierarchy=true
+        shift
+        ;;
+      *)
+        echo "Command argument '$1' is not recognized"
+        usage
+        exit 1
+        ;;
+    esac
+  done
 fi
 
-wiki=no
+# Some error checking on provided arguments to save user's
+# time, since the subsequent pipeline can run for some time.
+# group id should be an integer
+if ! echo "$grp"|grep -q '^[0-9][0-9]*$'; then
+  echo "Group ID '$grp' is invalid. It must be an integer."
+  exit 1
+fi
+if [ -n "$archivedir" -a ! -d "$archivedir" ]; then
+  echo "The provided archive directory, '$archivedir' is non-existent or not a directory"
+  exit 1
+fi
+if [ -n "$archivedir" -a "$noarchived" == "true" ]; then
+  echo "Cannot include both arguments -noarchived and -archivedhere. You are contradicting yourself."
+  exit 1
+fi
 
+# get full project ID list
+all_projects=$(gitlab group-project list --all --group-id $grp   \
+    --include-subgroups true |   \
+    sed '/^$/d;s/id: //')
+
+# initializations for the following processing
+wiki=false
+archivethis=false
 knarly_regexp=\
-'^\(name:\|ssh-url-to-repo\|path:\|  project-access: None\|empty-repo: True\)'
+'^\(name:\|ssh-url-to-repo\|path:\|path-with-namespace:\|  project-access: None\|empty-repo: True\|archived: True\)'
 
-# start pipe off by getting full project ID list
-gitlab group-project list --all --group-id $grp   \
-  --include-subgroups true |   \
-  sed '/^$/d;s/id: //' |   \
-  while read prj;do
-    # For each project ID, get a big block of meta-data
-    gitlab -v project get --id $prj
-  done |   \
-  # select just four fields from the meta-data
+# loop through all projects 
+for prj in $all_projects;do
+  paramfile=$(tempfile)  # this will be where the next pipeline writes all parameter assignments
+  # For each project ID, get a big block of meta-data on the project
+  gitlab -v project get --id $prj |  \
+  # select fields from the meta-data
   grep "$knarly_regexp" |   \
-  while read value;do
+  while read value; do
 
-    # empty-repo - true if just a wiki
+    # empty-repo - true if just a wiki, but maybe true if it is a regular repo and it's empty
     if echo "$value" | grep -q '^empty-repo: True' ; then
-      wiki=yes
+      echo -n 'wiki=true;' >> $paramfile
+
     # name field
     elif echo "$value" | grep -q ^name: ; then
       name=$(echo "$value" | sed 's/^name: //')
+      echo -n "name='$name';" >> $paramfile
       
     # path field
     elif echo "$value" | grep -q ^path: ; then
       path=$(echo "$value" | sed 's/^path: //')
-      
+      echo -n "path='$path';" >> $paramfile
+    
+    # path-with-namespace field
+    elif echo "$value" | grep -q '^path-with-namespace' ; then
+      hierpath=$(echo "$value" | sed 's/^path-with-namespace: //;s?^/??')
+      echo -n "hierpath='$hierpath';" >> $paramfile
+
     # ssh url field
     elif echo "$value" | grep -q ^ssh-url-to-repo: ; then
       url=$(echo "$value" | sed 's/ssh-url-to-repo: //')
-      # if there already exists a directory matching path,
-      # then assume we are done
-      if [ "$wiki" == "yes" ]; then
-	path="${path}.wiki"
-        if [ ! -d "$path" ]; then
-          echo -e "\n$name ($path) WIKI"
-          surl=${url/%\.git/.wiki.git}
-          git clone $surl
-	  wiki=no
-	fi
-      else
-        if [ ! -d "$path" ]; then
-  	  echo -e "\n$name ($path)"
-          git clone $url
-        fi
+      echo -n "url='$url';" >> $paramfile
+
+    # archived field
+    elif echo "$value" | grep -q "archived"; then
+      echo -n 'archivethis=true;' >> $paramfile
+
+	  fi
+
+  done  # processing the metadata, now take action
+  echo "" >> $paramfile
+
+  # now, if all required params are found in paramfile, then source it, otherwise error
+  if grep -q '\bname=' $paramfile && grep -q '\bpath=' $paramfile  \
+        && grep -q '\bhierpath=' $paramfile && grep -q '\burl=' $paramfile; then
+    . $paramfile
+    rm $paramfile
+  else
+    echo "ERROR: didn't find all required params in $paramfile for project $prj"
+    wiki=false
+    archivethis=false
+    continue
+  fi
+
+  if $archivethis; then 
+    if $noarchived ; then
+      echo "skipping archived repo $name";
+      wiki=false
+      archivethis=false
+      continue;
+    else
+      if [ "$archivedir" == "" ]; then archivethis=false; fi
+    fi
+  fi
+
+  wikifailed=false
+
+  # Try as wiki if it is empty
+  if $wiki; then
+    if $archivethis; then
+      wikipath="${archivedir}/${path}.wiki"
+      if $hierarchy; then
+        wikipath="${archivedir}/${hierpath}.wiki"
+      fi
+    else
+      wikipath="${path}.wiki"
+      if $hierarchy; then
+        wikipath="${hierpath}.wiki"
       fi
     fi
-  done
+    if [ ! -e "$wikipath" ]; then  # only execute if output file/dir doesn't already exist
+      echo "$name ($wikipath) WIKI"
+      wikiurl=${url/%\.git/.wiki.git}
+      git clone --quiet $wikiurl "$wikipath"
+      if [ $? -ne 0 ]; then wikifailed=true; fi  # capture the fact that there was actually no wiki
+      if $wikifailed; then echo "wiki-failed: $url"; fi
+    fi
+  fi
+  
+  # Try as regular repo if not wiki or if try as wiki failed
+  if ! $wiki || $wikifailed; then
+    if $hierarchy; then
+      path="$hierpath"
+    fi
+    if $archivethis; then
+      path="$archivedir/$path"
+    fi
+    # if there already exists a directory matching path, then assume we are done
+    if [ ! -e "$path" ]; then
+      echo "$name ($path)"
+      git clone --quiet $url $path &
+    fi
+  fi
+
+  # reset for next iteration
+  wiki=false
+  archivethis=false
+
+done
