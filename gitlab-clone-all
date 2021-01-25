@@ -115,53 +115,49 @@ knarly_regexp=\
 
 # loop through all projects 
 for prj in $all_projects;do
-  paramfile=$(tempfile)  # this will be where the next pipeline writes all parameter assignments
-  # For each project ID, get a big block of meta-data on the project
-  gitlab -v project get --id $prj |  \
-  # select fields from the meta-data
-  grep "$knarly_regexp" |   \
-  while read value; do
+  # For each project ID, get a big block of meta-data on the project and return parameter assignments
+  parameter_assignments=$(gitlab -v project get --id $prj |  \
+    # select fields from the meta-data
+    grep "$knarly_regexp" |   \
+    while read value; do
 
-    # empty-repo - true if just a wiki, but maybe true if it is a regular repo and it's empty
-    if echo "$value" | grep -q '^empty-repo: True' ; then
-      echo -n 'wiki=true;' >> $paramfile
+      # empty-repo - true if just a wiki, but maybe true if it is a regular repo and it's empty
+      if echo "$value" | grep -q '^empty-repo: True' ; then
+        echo -n 'wiki=true;'
 
-    # name field
-    elif echo "$value" | grep -q ^name: ; then
-      name=$(echo "$value" | sed 's/^name: //')
-      echo -n "name='$name';" >> $paramfile
+      # name field
+      elif echo "$value" | grep -q ^name: ; then
+        name=$(echo "$value" | sed 's/^name: //')
+        echo -n "name='$name';"
+        
+      # path field
+      elif echo "$value" | grep -q ^path: ; then
+        path=$(echo "$value" | sed 's/^path: //')
+        echo -n "path='$path';"
       
-    # path field
-    elif echo "$value" | grep -q ^path: ; then
-      path=$(echo "$value" | sed 's/^path: //')
-      echo -n "path='$path';" >> $paramfile
-    
-    # path-with-namespace field
-    elif echo "$value" | grep -q '^path-with-namespace' ; then
-      hierpath=$(echo "$value" | sed 's/^path-with-namespace: //;s?^/??')
-      echo -n "hierpath='$hierpath';" >> $paramfile
+      # path-with-namespace field
+      elif echo "$value" | grep -q '^path-with-namespace' ; then
+        hierpath=$(echo "$value" | sed 's/^path-with-namespace: //;s?^/??')
+        echo -n "hierpath='$hierpath';"
 
-    # ssh url field
-    elif echo "$value" | grep -q ^ssh-url-to-repo: ; then
-      url=$(echo "$value" | sed 's/ssh-url-to-repo: //')
-      echo -n "url='$url';" >> $paramfile
+      # ssh url field
+      elif echo "$value" | grep -q ^ssh-url-to-repo: ; then
+        url=$(echo "$value" | sed 's/ssh-url-to-repo: //')
+        echo -n "url='$url';"
 
-    # archived field
-    elif echo "$value" | grep -q "archived"; then
-      echo -n 'archivethis=true;' >> $paramfile
+      # archived field
+      elif echo "$value" | grep -q "archived"; then
+        echo -n 'archivethis=true;'
 
-	  fi
+      fi
 
-  done  # processing the metadata, now take action
-  echo "" >> $paramfile
+    done)  # processing the metadata
+  
+  # execute ("source") the parameter assignments in the base shell context
+  eval $parameter_assignments
 
-  # now, if all required params are found in paramfile, then source it, otherwise error
-  if grep -q '\bname=' $paramfile && grep -q '\bpath=' $paramfile  \
-        && grep -q '\bhierpath=' $paramfile && grep -q '\burl=' $paramfile; then
-    . $paramfile
-    rm $paramfile
-  else
-    echo "ERROR: didn't find all required params in $paramfile for project $prj"
+  if [ -z "$name" -o -z "$path" -o -z "$hierpath" -o -z "$url" ]; then
+    echo "ERROR: didn't find all required parameters for project $prj"
     wiki=false
     archivethis=false
     continue
